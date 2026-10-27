@@ -1,0 +1,451 @@
+import { useState, useEffect } from 'react';
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Box,
+  Typography,
+  IconButton,
+  Grid,
+  Paper,
+  CircularProgress,
+  Snackbar,
+  Alert,
+} from '@mui/material';
+import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon } from '@mui/icons-material';
+import { Report, ReportComponent, defaultReport, defaultComponent } from '../../types/report';
+import ComponentDialog from './ComponentDialog';
+import { reportService } from '../../services/reportService';
+import { useAuth } from '../../contexts/AuthContext';
+import { generateContent } from '../../services/geminiService';
+
+interface ReportDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onSave: (report: Omit<Report, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
+  report: Report | null;
+}
+
+
+const ReportDialog = ({ open, onClose, onSave, report }: ReportDialogProps) => {
+  const { user } = useAuth();
+  const [formData, setFormData] = useState<Omit<Report, 'id' | 'createdAt' | 'updatedAt'>>(defaultReport);
+  const [editingComponent, setEditingComponent] = useState<ReportComponent | null>(null);
+  const [isComponentDialogOpen, setIsComponentDialogOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState<string>('');
+  const [runResults, setRunResults] = useState<{[key: string]: string}>({});
+
+  useEffect(() => {
+    if (report) {
+      setFormData(report);
+    } else {
+      setFormData({
+        ...defaultReport,
+        name: '',
+        components: [],
+      });
+    }
+  }, [report, open]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const { name, value, type } = e.target as HTMLInputElement;
+    const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
+    
+    setFormData(prev => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
+  const handleAddComponent = () => {
+    setEditingComponent({ ...defaultComponent, id: Date.now().toString() });
+    setIsComponentDialogOpen(true);
+  };
+
+  const handleEditComponent = (component: ReportComponent) => {
+    setEditingComponent(component);
+    setIsComponentDialogOpen(true);
+  };
+
+  const handleSaveComponent = (component: ReportComponent) => {
+    const existingIndex = formData.components.findIndex(c => c.id === component.id);
+    const newComponents = [...formData.components];
+    
+    if (existingIndex >= 0) {
+      newComponents[existingIndex] = component;
+    } else {
+      newComponents.push(component);
+    }
+    
+    setFormData(prev => ({
+      ...prev,
+      components: newComponents,
+    }));
+    
+    setIsComponentDialogOpen(false);
+    setEditingComponent(null);
+  };
+
+  const handleDeleteComponent = (id: string) => {
+    setFormData(prev => ({
+      ...prev,
+      components: prev.components.filter(c => c.id !== id),
+    }));
+  };
+
+  const runReport = useCallback(async () => {
+    if (!apiKey) {
+      setError('Please enter your Google Gemini API key');
+      return;
+    }
+
+    setIsRunning(true);
+    setError(null);
+    setRunResults({});
+
+    try {
+      const results: {[key: string]: string} = {};
+      
+      // Run each component's prompt through Gemini
+      for (const component of formData.components) {
+        if (component.isGptEnabled && component.gptPrompt) {
+          try {
+            const prompt = `Context: ${formData.market}\n` +
+                        `Audience: ${formData.audience}\n` +
+                        `Tone: ${formData.tone}\n` +
+                        `Component: ${component.name}\n\n` +
+                        `Instructions: ${component.gptPrompt}\n` +
+                        `Word limit: ${component.wordLimit || 'None'}`;
+            
+            const response = await generateContent(apiKey, prompt);
+            results[component.id] = response.text;
+          } catch (err) {
+            console.error(`Error running component ${component.name}:`, err);
+            results[component.id] = `Error: ${err instanceof Error ? err.message : 'Failed to generate content'}`;
+          }
+        }
+      }
+      
+      setRunResults(results);
+    } catch (err) {
+      console.error('Error running report:', err);
+      setError(`Failed to run report: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [formData, apiKey]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    
+    setIsLoading(true);
+    setError(null);
+    
+    try {
+      const reportData = {
+        title: formData.name,
+        description: `${formData.market} | ${formData.audience} | ${formData.tone}`,
+        user_id: user.id,
+      };
+      
+      if (report?.id) {
+        // Update existing report
+        const updatedReport = await reportService.updateReport(report.id, reportData);
+        
+        // Update components
+        const currentComponents = await reportService.getComponents(updatedReport.id);
+        
+        // Delete removed components
+        const componentsToDelete = currentComponents.filter(
+          c => !formData.components.some(comp => comp.id === c.id)
+        );
+        
+        await Promise.all(
+          componentsToDelete.map(c => reportService.deleteComponent(c.id))
+        );
+        
+        // Update or create components
+        await Promise.all(
+          formData.components.map(async (component, index) => {
+            const componentData = {
+              name: component.name,
+              type: 'text', // or derive from component type
+              content: {
+                wordLimit: component.wordLimit,
+                characterLimit: component.characterLimit,
+                gptPrompt: component.gptPrompt,
+                isGptEnabled: component.isGptEnabled
+              },
+              order: index,
+              report_id: updatedReport.id
+            };
+            
+            if (component.id.startsWith('temp-')) {
+              // New component
+              await reportService.createComponent(componentData);
+            } else {
+              // Update existing component
+              await reportService.updateComponent(component.id, componentData);
+            }
+          })
+        );
+      } else {
+        // Create new report
+        const newReport = await reportService.createReport(reportData);
+        
+        // Create components
+        await Promise.all(
+          formData.components.map(async (component, index) => {
+            await reportService.createComponent({
+              name: component.name,
+              type: 'text', // or derive from component type
+              content: {
+                wordLimit: component.wordLimit,
+                characterLimit: component.characterLimit,
+                gptPrompt: component.gptPrompt,
+                isGptEnabled: component.isGptEnabled
+              },
+              order: index,
+              report_id: newReport.id
+            });
+          })
+        );
+      }
+      
+      await onSave(formData);
+      onClose();
+    } catch (err) {
+      console.error('Error saving report:', err);
+      setError('Failed to save report. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+        <form onSubmit={handleSubmit}>
+          <DialogTitle>{report ? 'Edit Report' : 'Create New Report'}</DialogTitle>
+          <DialogContent dividers>
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={6}>
+                <TextField
+                  autoFocus
+                  margin="dense"
+                  name="name"
+                  label="Report Name"
+                  type="text"
+                  fullWidth
+                  variant="outlined"
+                  value={formData.name}
+                  onChange={handleInputChange}
+                  required
+                />
+                
+                <TextField
+                  margin="dense"
+                  name="market"
+                  label="Context"
+                  type="text"
+                  fullWidth
+                  variant="outlined"
+                  value={formData.market}
+                  onChange={handleInputChange}
+                  required
+                  multiline
+                  minRows={2}
+                  maxRows={4}
+                  sx={{ '& .MuiInputBase-input': { fontSize: '0.875rem' } }}
+                />
+                
+                <TextField
+                  margin="dense"
+                  name="audience"
+                  label="Audience"
+                  type="text"
+                  fullWidth
+                  variant="outlined"
+                  value={formData.audience}
+                  onChange={handleInputChange}
+                  required
+                  multiline
+                  minRows={2}
+                  maxRows={4}
+                  sx={{ '& .MuiInputBase-input': { fontSize: '0.875rem' } }}
+                />
+                
+                <TextField
+                  margin="dense"
+                  name="tone"
+                  label="Tone"
+                  type="text"
+                  fullWidth
+                  variant="outlined"
+                  value={formData.tone}
+                  onChange={handleInputChange}
+                  required
+                  multiline
+                  minRows={2}
+                  maxRows={4}
+                  sx={{ '& .MuiInputBase-input': { fontSize: '0.875rem' } }}
+                />
+
+              </Grid>
+              
+              <Grid item xs={12} md={6}>
+                <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+                  <Box>
+                    <Typography variant="h6" component="span" sx={{ mr: 2 }}>Components</Typography>
+                    <Typography variant="body2" color="textSecondary" component="span">
+                      ({formData.components.length}/10)
+                    </Typography>
+                  </Box>
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    startIcon={<AddIcon />}
+                    onClick={handleAddComponent}
+                    disabled={formData.components.length >= 10}
+                  >
+                    New Component
+                  </Button>
+                </Box>
+                
+                {formData.components.length === 0 ? (
+                  <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 4 }}>
+                    No components added yet. Click "Add Component" to get started.
+                  </Typography>
+                ) : (
+                  <Box sx={{ maxHeight: 300, overflow: 'auto' }}>
+                    {formData.components.map((component) => (
+                      <Paper key={component.id} sx={{ p: 2, mb: 1 }}>
+                        <Box display="flex" justifyContent="space-between" alignItems="center">
+                          <Box>
+                            <Typography variant="subtitle1">{component.name}</Typography>
+                            <Typography variant="body2" color="textSecondary">
+                              {component.wordLimit ? `${component.wordLimit} words` : 'No length specified'}
+                            </Typography>
+                            {component.gptPrompt && (
+                              <Typography variant="body2" color="textSecondary" noWrap>
+                                {component.gptPrompt.length > 50 
+                                  ? `${component.gptPrompt.substring(0, 50)}...` 
+                                  : component.gptPrompt}
+                              </Typography>
+                            )}
+                          </Box>
+                          <Box>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleEditComponent(component)}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleDeleteComponent(component.id)}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Box>
+                        </Box>
+                      </Paper>
+                    ))}
+                  </Box>
+                )}
+              </Grid>
+            </Grid>
+            
+            {/* Display run results */}
+            {Object.keys(runResults).length > 0 && (
+              <Box mt={4}>
+                <Typography variant="h6" gutterBottom>
+                  Report Results
+                </Typography>
+                {formData.components
+                  .filter(comp => runResults[comp.id])
+                  .map(component => (
+                    <Box key={component.id} mb={3}>
+                      <Typography variant="subtitle1" color="primary" gutterBottom>
+                        {component.name}
+                      </Typography>
+                      <Paper variant="outlined" sx={{ p: 2, whiteSpace: 'pre-wrap' }}>
+                        {runResults[component.id]}
+                      </Paper>
+                    </Box>
+                  ))
+                }
+              </Box>
+            )}
+          </DialogContent>
+          <DialogActions sx={{ justifyContent: 'space-between', p: 2 }}>
+            <Box>
+              <TextField
+                size="small"
+                label="Gemini API Key"
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Enter your Gemini API key"
+                disabled={isLoading || isRunning}
+                sx={{ width: 250, mr: 2 }}
+              />
+              <Button 
+                variant="outlined"
+                color="primary"
+                onClick={runReport}
+                disabled={isLoading || isRunning || formData.components.length === 0}
+                startIcon={isRunning ? <CircularProgress size={20} /> : null}
+              >
+                Run Report
+              </Button>
+            </Box>
+            <Box>
+              <Button onClick={onClose} disabled={isLoading || isRunning} sx={{ mr: 1 }}>
+                Cancel
+              </Button>
+              <Button 
+                type="submit" 
+                variant="contained" 
+                color="primary"
+                disabled={isLoading || isRunning}
+                startIcon={isLoading ? <CircularProgress size={20} /> : null}
+              >
+                {report ? 'Update' : 'Create'} Report
+              </Button>
+            </Box>
+          </DialogActions>
+          <Snackbar 
+            open={!!error} 
+            autoHideDuration={6000} 
+            onClose={() => setError(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          >
+            <Alert onClose={() => setError(null)} severity="error" sx={{ width: '100%' }}>
+              {error}
+            </Alert>
+          </Snackbar>
+        </form>
+      </Dialog>
+      
+      <ComponentDialog
+        open={isComponentDialogOpen}
+        onClose={() => {
+          setIsComponentDialogOpen(false);
+          setEditingComponent(null);
+        }}
+        component={editingComponent}
+        onSave={handleSaveComponent}
+      />
+    </>
+  );
+};
+
+export default ReportDialog;

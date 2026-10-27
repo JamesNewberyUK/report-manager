@@ -1,0 +1,317 @@
+import { useState, useEffect } from 'react';
+import {
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Box,
+  Typography,
+  Grid,
+  CircularProgress,
+  Snackbar,
+  Alert,
+} from '@mui/material';
+import { Report, defaultReport } from '../../types/report';
+import { Add as AddIcon } from '@mui/icons-material';
+
+// Define the ReportWithComponents type locally since it's not exported from the types file
+interface ReportWithComponents extends Omit<Report, 'components'> {
+  components: Array<{
+    id: string;
+    name: string;
+    isGptEnabled: boolean;
+    wordLimit?: number;
+    characterLimit?: number;
+    gptPrompt?: string;
+  }>;
+}
+import { useAuth } from '../../contexts/AuthContext';
+
+interface ReportDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onSave: (report: Omit<Report, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
+  report: Report | null;
+}
+
+
+const ReportDialog = ({ open, onClose, onSave, report }: ReportDialogProps) => {
+  const { user } = useAuth();
+  const [formData, setFormData] = useState<Omit<ReportWithComponents, 'id' | 'createdAt' | 'updatedAt'>>(defaultReport);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (report) {
+      setFormData(report);
+    } else {
+      setFormData({
+        ...defaultReport,
+        name: '',
+        components: [],
+      });
+    }
+  }, [report, open]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const { name, value, type } = e.target;
+    const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
+    
+    setFormData(prev => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
+
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    
+    setIsLoading(true);
+    setError(null);
+    
+    try {
+      // Create a clean report object to pass to the parent
+      const reportToSave: Omit<ReportWithComponents, 'id' | 'createdAt' | 'updatedAt'> = {
+        name: formData.name || '',
+        market: formData.market || '',
+        audience: formData.audience || '',
+        tone: formData.tone || '',
+        components: (formData.components || []).map((component: any) => ({
+          id: component.id || `temp-${Date.now()}`,
+          name: component.name || '',
+          isGptEnabled: Boolean(component.isGptEnabled),
+          wordLimit: component.wordLimit,
+          characterLimit: component.characterLimit,
+          gptPrompt: component.gptPrompt || ''
+        }))
+      };
+
+      // Pass the clean report data to the parent component
+      await onSave(reportToSave);
+      
+      // Close the dialog after successful save
+      onClose();
+    } catch (err) {
+      console.error('Error in form submission:', err);
+      setError('Failed to save report. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+        <form onSubmit={handleSubmit}>
+          <DialogTitle>{report ? 'Edit Report' : 'Create New Report'}</DialogTitle>
+          <DialogContent>
+            <Grid container spacing={3}>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Report Name"
+                  name="name"
+                  value={formData.name || ''}
+                  onChange={handleInputChange}
+                  required
+                  margin="normal"
+                />
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth
+                  label="Market"
+                  name="market"
+                  value={formData.market || ''}
+                  onChange={handleInputChange}
+                  required
+                  margin="normal"
+                />
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth
+                  label="Audience"
+                  name="audience"
+                  value={formData.audience || ''}
+                  onChange={handleInputChange}
+                  required
+                  margin="normal"
+                />
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth
+                  label="Tone"
+                  type="text"
+                  size="small"
+                  variant="outlined"
+                  value={formData.tone}
+                  onChange={handleInputChange}
+                  required
+                  multiline
+                  minRows={2}
+                  maxRows={4}
+                  InputLabelProps={{
+                    sx: { fontSize: '0.85rem' },
+                    shrink: true
+                  }}
+                  inputProps={{
+                    style: { fontSize: '0.85rem' }
+                  }}
+                />
+
+              </Grid>
+              
+              <Grid item xs={12} md={6}>
+                <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
+                  <Box>
+                    <Typography variant="subtitle2" component="span" sx={{ mr: 1, fontSize: '0.875rem', fontWeight: 600 }}>Components</Typography>
+                    <Typography variant="caption" color="textSecondary" component="span">
+                      ({formData.components.length}/10)
+                    </Typography>
+                  </Box>
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    startIcon={<AddIcon />}
+                    onClick={handleAddComponent}
+                    disabled={formData.components.length >= 10}
+                  >
+                    New Component
+                  </Button>
+                </Box>
+                
+                {formData.components.length === 0 ? (
+                  <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 4 }}>
+                    No components added yet. Click "Add Component" to get started.
+                  </Typography>
+                ) : (
+                  <Box sx={{ maxHeight: 300, overflow: 'auto' }}>
+                    {formData.components.map((component) => (
+                      <Paper key={component.id} sx={{ p: 2, mb: 1 }}>
+                        <Box display="flex" justifyContent="space-between" alignItems="center">
+                          <Box>
+                            <Typography variant="subtitle2" sx={{ fontSize: '0.8rem', lineHeight: 1.2, mb: 0.5 }}>{component.name}</Typography>
+                            <Typography variant="caption" color="textSecondary" sx={{ display: 'block', fontSize: '0.7rem', lineHeight: 1.2, mb: 0.5 }}>
+                              {component.wordLimit ? `${component.wordLimit} words` : 'No length specified'}
+                            </Typography>
+                            {component.gptPrompt && (
+                              <Typography variant="caption" color="textSecondary" noWrap sx={{ display: 'block', fontSize: '0.7rem' }}>
+                                {component.gptPrompt.length > 50 
+                                  ? `${component.gptPrompt.substring(0, 50)}...` 
+                                  : component.gptPrompt}
+                              </Typography>
+                            )}
+                          </Box>
+                          <Box>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleEditComponent(component)}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleDeleteComponent(component.id)}
+                              sx={{ color: 'error.main' }}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Box>
+                        </Box>
+                      </Paper>
+                    ))}
+                  </Box>
+                )}
+              </Grid>
+            </Grid>
+            
+            {/* Display run results */}
+            {Object.keys(runResults).length > 0 && (
+              <Box mt={4}>
+                <Typography variant="h6" gutterBottom>
+                  Report Results
+                </Typography>
+                {formData.components
+                  .filter(comp => runResults[comp.id])
+                  .map(component => (
+                    <Box key={component.id} mb={3}>
+                      <Typography variant="subtitle1" color="primary" gutterBottom>
+                        {component.name}
+                      </Typography>
+                      <Paper variant="outlined" sx={{ p: 2, whiteSpace: 'pre-wrap' }}>
+                        {runResults[component.id]}
+                      </Paper>
+                    </Box>
+                  ))
+                }
+              </Box>
+            )}
+          </DialogContent>
+          <DialogActions sx={{ justifyContent: 'flex-end', p: 2 }}>
+            <Button 
+              onClick={onClose} 
+              disabled={isLoading || isRunning}
+              sx={{ mr: 1, fontSize: '0.75rem', py: 0.5 }}
+              size="small"
+            >
+              Cancel
+            </Button>
+            {true && ( // Temporarily always show for debugging
+              <Tooltip title="Export as HTML">
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  onClick={exportToHtml}
+                  startIcon={<FileDownloadIcon />}
+                  sx={{ mr: 1, fontSize: '0.75rem', py: 0.5 }}
+                  size="small"
+                >
+                  Export
+                <DialogActions>
+        <Button onClick={onClose} disabled={isLoading}>
+          Cancel
+        </Button>
+        <Button 
+          type="submit" 
+          variant="contained" 
+          color="primary" 
+          disabled={isLoading}
+          startIcon={isLoading ? <CircularProgress size={20} /> : null}
+        >
+          {isLoading ? 'Saving...' : 'Save'}
+        </Button>
+      </DialogActions>
+          <Snackbar 
+            open={!!error} 
+            autoHideDuration={6000} 
+            onClose={() => setError(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+{{ ... }}
+            <Alert onClose={() => setError(null)} severity="error" sx={{ width: '100%' }}>
+              {error}
+            </Alert>
+          </Snackbar>
+        </form>
+      </Dialog>
+      
+      <ComponentDialog
+        open={isComponentDialogOpen}
+        onClose={() => {
+          setIsComponentDialogOpen(false);
+          setEditingComponent(null);
+        }}
+        component={editingComponent}
+        onSave={handleSaveComponent}
+      />
+    </>
+  );
+};
+
+export default ReportDialog;
